@@ -1,0 +1,52 @@
+name: NARDEK IA - APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['*.zip']
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    if: github.actor != 'github-actions[bot]'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Descompactar projeto
+        run: |
+          ZIP=$(ls *.zip 2>/dev/null | head -1 || true)
+          if [ -z "$ZIP" ]; then
+            echo "Projeto ja descompactado."
+            exit 0
+          fi
+          echo "Descompactando $ZIP"
+          unzip -o "$ZIP" -d .
+          rm -f "$ZIP"
+          git config user.name "nardek-bot"
+          git config user.email "bot@nardek.local"
+          git add -A
+          git diff --cached --quiet || git commit -m "Boots"
+          git push || true
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Compilar APK
+        run: |
+          cd NARDEK_IA || cd .
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload do APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nardek-apk-debug
+          path: |
+            **/build/outputs/apk/debug/*.apk
