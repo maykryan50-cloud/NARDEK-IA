@@ -5,6 +5,7 @@ on:
   push:
     branches: [main]
     paths: ['*.zip']
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -12,24 +13,50 @@ jobs:
     if: github.actor != 'github-actions[bot]'
     permissions:
       contents: write
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Descompactar projeto
+      - name: Preparar o projeto (descompactar e achar o gradlew)
         run: |
+          shopt -s dotglob nullglob
           ZIP=$(ls *.zip 2>/dev/null | head -1 || true)
-          if [ -z "$ZIP" ]; then
-            echo "Projeto ja descompactado."
-            exit 0
+          if [ -n "$ZIP" ]; then
+            echo "==> Descompactando $ZIP"
+            unzip -q -o "$ZIP" -d .
+            rm -f "$ZIP"
+          else
+            echo "==> Nenhum ZIP encontrado (projeto já descompactado)"
           fi
-          echo "Descompactando $ZIP"
-          unzip -o "$ZIP" -d .
-          rm -f "$ZIP"
+
+          if [ ! -f gradlew ]; then
+            ENCONTRADO=$(find . -maxdepth 3 -name gradlew -not -path './.git/*' | head -1)
+            if [ -n "$ENCONTRADO" ]; then
+              ORIGEM=$(dirname "$ENCONTRADO")
+              echo "==> gradlew estava em $ORIGEM — subindo os arquivos para a raiz"
+              mv "$ORIGEM"/* . 2>/dev/null || true
+              rmdir "$ORIGEM" 2>/dev/null || true
+            fi
+          fi
+
+          if [ ! -f gradlew ]; then
+            echo "::error::gradlew não encontrado no projeto. Conteúdo atual:"; ls -la
+            exit 1
+          fi
+
+          chmod +x gradlew
+          rm -rf .github/workflows/../.github 2>/dev/null || true
+          echo "==> Estrutura na raiz:"; ls -a | head -20
+
           git config user.name "nardek-bot"
           git config user.email "bot@nardek.local"
           git add -A
-          git diff --cached --quiet || git commit -m "Boots"
-          git push || true
+          if git diff --cached --quiet; then
+            echo "==> Nada novo para enviar"
+          else
+            git commit -m "Bootstrap: projeto NARDEK IA V1"
+            git push || echo "::warning::Não foi possível enviar ao repositório (o build continua)"
+          fi
 
       - uses: actions/setup-java@v4
         with:
@@ -38,15 +65,24 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: Compilar APK
+      - name: Ajustar memória do robô
         run: |
-          cd NARDEK_IA || cd .
-          chmod +x gradlew
-          ./gradlew assembleDebug
+          sed -i 's/-Xmx512m/-Xmx3g/; s/MaxMetaspaceSize=192m/MaxMetaspaceSize=768m/; s/-Xmx384m/-Xmx1024m/' gradle.properties
+          grep -E "jvmargs" gradle.properties
 
-      - name: Upload do APK
+      - name: Compilar o APK de debug
+        run: ./gradlew :app:assembleDebug --no-daemon --console=plain --stacktrace
+
+      - name: Mostrar o SHA-1 do certificado de teste
+        run: |
+          keytool -list -v -keystore "$HOME/.android/debug.keystore" \
+            -alias androiddebugkey -storepass android -keypass android 2>/dev/null \
+
+            | grep -E "SHA1|SHA256" || echo "certificado ainda não existe nesta execução"
+
+      - name: Publicar o APK em Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: nardek-apk-debug
-          path: |
-            **/build/outputs/apk/debug/*.apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
