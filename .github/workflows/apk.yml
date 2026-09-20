@@ -1,4 +1,22 @@
-name: NARDEK IA - APK
+: NARDEK IA — APK
+
+# ============================================================
+#  Como usar:
+#    1) crie/atualize este arquivo no GitHub em .github/workflows/apk.yml
+#    2) suba o ZIP do projeto na branch main (o build dispara sozinho)
+#    3) aguarde ficar verde e baixe o APK em "Artifacts"
+#
+#  Este workflow se protege contra os problemas já enfrentados:
+#    * ZIP com pasta por cima  -> ele "achata" os arquivos para a raiz
+#    * ZIP ausente             -> ele segue direto para o build
+#    * gradlew/wrapper faltando-> ele para com mensagem clara do que falta
+#
+#  Ele NÃO dispara quando você commita só o próprio workflow (o gatilho
+#  é o upload de um arquivo .zip), evitando build sem projeto no repositório.
+#
+#  Memória: o limite é elevado SÓ para o robô (~7 GB). O gradle.properties
+#  do projeto continua com 512 MB, valor correto para o seu celular.
+# ============================================================
 
 on:
   workflow_dispatch:
@@ -17,9 +35,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Preparar o projeto (descompactar e achar o gradlew)
+      # ---------------------------------------------------------
+      # 1) Prepara o projeto e confere os arquivos de compilação
+      # ---------------------------------------------------------
+      - name: Preparar projeto e conferir arquivos de build
         run: |
           shopt -s dotglob nullglob
+
           ZIP=$(ls *.zip 2>/dev/null | head -1 || true)
           if [ -n "$ZIP" ]; then
             echo "==> Descompactando $ZIP"
@@ -29,35 +51,69 @@ jobs:
             echo "==> Nenhum ZIP encontrado (projeto já descompactado)"
           fi
 
+          # Se o gradlew veio dentro de uma pasta, sobe tudo para a raiz
           if [ ! -f gradlew ]; then
-            ENCONTRADO=$(find . -maxdepth 3 -name gradlew -not -path './.git/*' | head -1)
-            if [ -n "$ENCONTRADO" ]; then
+            ENCONTRADO=$(find . -maxdepth 3 -name gradlew -not -path './.git/*' | head -1 || true)
+            if [ -n "$ENCONTRADO" ] && [ "$(dirname "$ENCONTRADO")" != "." ]; then
               ORIGEM=$(dirname "$ENCONTRADO")
-              echo "==> gradlew estava em $ORIGEM — subindo os arquivos para a raiz"
+              echo "==> gradlew estava em '$ORIGEM' — movendo os arquivos para a raiz"
+              shopt -s dotglob
               mv "$ORIGEM"/* . 2>/dev/null || true
               rmdir "$ORIGEM" 2>/dev/null || true
             fi
           fi
 
-          if [ ! -f gradlew ]; then
-            echo "::error::gradlew não encontrado no projeto. Conteúdo atual:"; ls -la
+          chmod +x gradlew 2>/dev/null || true
+
+          # --- conferência explícita do que o build precisa ---
+          FALTANDO=0
+          for ARQ in gradlew gradle/wrapper/gradle-wrapper.jar gradle/wrapper/gradle-wrapper.properties settings.gradle.kts app/build.gradle.kts; do
+            if [ -f "$ARQ" ]; then
+              echo "  OK   $ARQ"
+            else
+              echo "  FALTA $ARQ"
+              FALTANDO=1
+            fi
+          done
+          if [ "$FALTANDO" = "1" ]; then
+            echo "::error::O pacote enviado está incompleto. Conteúdo da raiz:"
+            ls -la
             exit 1
           fi
 
-          chmod +x gradlew
-          rm -rf .github/workflows/../.github 2>/dev/null || true
-          echo "==> Estrutura na raiz:"; ls -a | head -20
+          echo "==> Estrutura pronta:"
+          ls -a | head -25
 
+      # ---------------------------------------------------------
+      # 2) Devolve o projeto para o repositório (não mexe em .github)
+      # ---------------------------------------------------------
+      - name: Enviar os arquivos para o repositório
+        run: |
           git config user.name "nardek-bot"
           git config user.email "bot@nardek.local"
           git add -A
+          # O GitHub proíbe robôs de criar/alterar arquivos de workflow.
+          # Como o .github vai dentro do ZIP, tiramos ele do envio:
+          # o seu arquivo do repositório permanece intacto.
+          git reset -q -- .github 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "==> Nada novo para enviar"
           else
             git commit -m "Bootstrap: projeto NARDEK IA V1"
-            git push || echo "::warning::Não foi possível enviar ao repositório (o build continua)"
+            git push || echo "::warning::Não foi possível enviar ao repositório (o build continua normalmente)"
           fi
 
+      # ---------------------------------------------------------
+      # 3) Firebase (V3) — descomente quando tiver o arquivo + Secret
+      #    (veja app/LEIA-ME_google-services.md)
+      # ---------------------------------------------------------
+      # - name: Restaurar google-services.json
+      #   if: ${{ secrets.GOOGLE_SERVICES_JSON_B64 != '' }}
+      #   run: echo "${{ secrets.GOOGLE_SERVICES_JSON_B64 }}" | base64 -d > app/google-services.json
+
+      # ---------------------------------------------------------
+      # 4) Ferramentas e build
+      # ---------------------------------------------------------
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -67,7 +123,13 @@ jobs:
 
       - name: Ajustar memória do robô
         run: |
-          sed -i 's/-Xmx512m/-Xmx3g/; s/MaxMetaspaceSize=192m/MaxMetaspaceSize=768m/; s/-Xmx384m/-Xmx1024m/' gradle.properties
+          if grep -q "org.gradle.jvmargs" gradle.properties; then
+            sed -i 's/-Xmx512m/-Xmx3g/; s/MaxMetaspaceSize=192m/MaxMetaspaceSize=768m/; s/-Xmx384m/-Xmx1024m/' gradle.properties
+            echo "==> Memória ajustada:"
+          else
+            echo "org.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8" >> gradle.properties
+            echo "==> Linha de jvmargs criada:"
+          fi
           grep -E "jvmargs" gradle.properties
 
       - name: Compilar o APK de debug
@@ -77,7 +139,6 @@ jobs:
         run: |
           keytool -list -v -keystore "$HOME/.android/debug.keystore" \
             -alias androiddebugkey -storepass android -keypass android 2>/dev/null \
-
             | grep -E "SHA1|SHA256" || echo "certificado ainda não existe nesta execução"
 
       - name: Publicar o APK em Artifacts
